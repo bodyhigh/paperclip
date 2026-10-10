@@ -206,9 +206,20 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
           or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
             sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
         )).limit(1) : [];
+      // The release path inserts recovery and deferred runs directly. Retain
+      // the source run's server-derived one-shot binding even if the current
+      // agent policy was cleared while that run was active.
+      const [historicalOneShotRun] = issueId ? await tx.select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+          sql`${heartbeatRuns.contextSnapshot}->>'oneShotIssueId' = ${issueId}`,
+          or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+        )).limit(1) : [];
+      const effectiveOneShotIssueId = oneShotIssueId ?? (historicalOneShotRun ? issueId : null);
       return { id: agent.id, companyId: agent.companyId, name: agent.name,
-        invokable: invokability.invokable, oneShotIssueId,
-        oneShotIssueRunLimitReached: Boolean(priorOneShotRun) };
+        invokable: invokability.invokable, oneShotIssueId: effectiveOneShotIssueId,
+        oneShotIssueRunLimitReached: Boolean(priorOneShotRun || historicalOneShotRun) };
     },
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {
