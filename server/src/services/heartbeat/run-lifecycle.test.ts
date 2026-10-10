@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -116,6 +117,26 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, wakeupRequestId: wake.id, status: "running", runtimeMode: "native", ...patch }).returning();
     return { company, agent, wake, run };
   }
+
+  it("does not queue a missing-comment retry when the source run remains one-shot after policy removal", async () => {
+    const issueId = randomUUID();
+    const { company, agent, run } = await fixture({
+      status: "succeeded",
+      contextSnapshot: { issueId, oneShotIssueId: issueId, wakeReason: "issue_assigned" },
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId: company.id, title: "Invented one-shot comment case",
+      status: "in_progress", priority: "medium", issueNumber: 1,
+      identifier: "LM-1", assigneeAgentId: agent.id, executionRunId: run.id,
+    });
+    const deps = callbacks(db);
+    deps.resolveResponsibleUserIdForRunContext = vi.fn(async () => "invented-operator");
+    const result = await createHeartbeatLifecycle(db, deps).finalizeIssueCommentPolicy(run, agent);
+    expect(result).toMatchObject({ outcome: "not_applicable", queuedRun: null });
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agent.id));
+    expect(runs).toHaveLength(1);
+    expect(deps.enqueueWakeup).not.toHaveBeenCalled();
+  });
 
   it("preserves sandbox process birth instead of inspecting a colliding controller PID", async () => {
     const { run } = await fixture();

@@ -26,7 +26,7 @@ import {
 import { cancellationResultJson } from "../run-cancellation.js";
 import { accountRunCost } from "../run-cost-accounting.js";
 import { isWaitingConversation } from "../agent-conversations.js";
-import { heartbeatOneShotIssueId } from "../heartbeat-policy.js";
+import { isHistoricalOneShotIssueRun } from "../heartbeat-policy.js";
 import { PROCESS_IDENTITY_RECORDED } from "../native-local-process-stop.js";
 import {
   hasAcknowledgedNativeReassignmentStopIntent,
@@ -2489,7 +2489,11 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
-    if (heartbeatOneShotIssueId(agent)) {
+    const oneShotIssueId = readNonEmptyString(contextSnapshot.oneShotIssueId)
+      ?? run.issueId
+      ?? readNonEmptyString(contextSnapshot.issueId)
+      ?? "";
+    if (isHistoricalOneShotIssueRun(agent, run, oneShotIssueId)) {
       await patchRunIssueCommentStatus(run.id, {
         issueCommentStatus: "not_applicable",
         issueCommentSatisfiedByCommentId: null,

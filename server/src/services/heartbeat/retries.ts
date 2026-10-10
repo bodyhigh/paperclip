@@ -10,7 +10,7 @@ import {
   hasConversationContinuationPolicy,
 } from "../conversation-continuation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
-import { heartbeatOneShotIssueId } from "../heartbeat-policy.js";
+import { isHistoricalOneShotIssueRun } from "../heartbeat-policy.js";
 import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
@@ -396,7 +396,11 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       delayMs?: number;
     },
   ) {
-    if (heartbeatOneShotIssueId(agent)) {
+    const oneShotIssueId = readNonEmptyString(run.contextSnapshot?.oneShotIssueId)
+      ?? run.issueId
+      ?? readNonEmptyString(run.contextSnapshot?.issueId)
+      ?? "";
+    if (isHistoricalOneShotIssueRun(agent, run, oneShotIssueId)) {
       return { outcome: "not_scheduled" as const, reason: "one_shot_work_order",
         issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     }

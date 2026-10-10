@@ -93,6 +93,20 @@ describe("heartbeat retry module callbacks", () => {
     expect(database.access).not.toHaveBeenCalled();
   });
 
+  it("does not retry a historically one-shot run after its agent policy is cleared", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks();
+    const run = unitRun();
+    run.contextSnapshot = { ...run.contextSnapshot, oneShotIssueId: "issue" };
+    const result = await extracted.createHeartbeatRetries(database.db, deps).scheduleBoundedRetryForRun(
+      run,
+      { adapterType: "codex_local", runtimeConfig: { heartbeat: {} } } as unknown as Agent,
+    );
+    expect(result).toMatchObject({ outcome: "not_scheduled", reason: "one_shot_work_order" });
+    expect(database.access).not.toHaveBeenCalled();
+    expect(deps.runDispatch.evaluateScheduledRetryGate).not.toHaveBeenCalled();
+  });
+
   it.each(["missing_run", "missing_agent"] as const)("keeps %s lookup behavior and requests the full source result", async (outcome) => {
     const database = guardedDatabase();
     const deps = callbacks();
