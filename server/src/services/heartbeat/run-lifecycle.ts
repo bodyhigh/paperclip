@@ -26,6 +26,7 @@ import {
 import { cancellationResultJson } from "../run-cancellation.js";
 import { accountRunCost } from "../run-cost-accounting.js";
 import { isWaitingConversation } from "../agent-conversations.js";
+import { heartbeatOneShotIssueId } from "../heartbeat-policy.js";
 import { PROCESS_IDENTITY_RECORDED } from "../native-local-process-stop.js";
 import {
   hasAcknowledgedNativeReassignmentStopIntent,
@@ -2485,6 +2486,21 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
           issueCommentRetryQueuedAt: null,
         });
       }
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
+    if (heartbeatOneShotIssueId(agent)) {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Missing-comment retry suppressed for a one-shot work order; operator must reconcile disposition",
+      });
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
     const issueId = readNonEmptyString(contextSnapshot.issueId);

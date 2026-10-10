@@ -119,7 +119,7 @@ import {
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
-import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { heartbeatOneShotIssueId, isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
@@ -3828,6 +3828,10 @@ export function recoveryService(
 
     const ownerAgentId = current.assigneeAgentId;
     const ownerAgent = ownerAgentId ? await getAgent(ownerAgentId) : null;
+    // A one-shot work order deliberately leaves unfinished disposition for the
+    // external supervisor to reconcile. Recovery must not reserve a successor
+    // run behind the queue's issue-scoped admission guard.
+    if (ownerAgent && heartbeatOneShotIssueId(ownerAgent)) return "skipped";
     const ownerInvokable =
       ownerAgent && ownerAgent.companyId === current.companyId
         ? (await isAgentInvokable(ownerAgent)) &&

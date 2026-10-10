@@ -209,6 +209,68 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       .then((rows) => rows[0] ?? null);
   }
 
+  it("admits only one run for an issue-scoped one-shot work order across distinct wake triggers", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db.update(agents).set({
+      runtimeConfig: {
+        heartbeat: {
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+          oneShotIssueId: issueId,
+        },
+      },
+    }).where(eq(agents.id, agentId));
+
+    const first = await assignmentWake(agentId, issueId);
+    expect(first).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const second = await heartbeat.wakeup(agentId, {
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "distinct_one_shot_retry",
+      payload: { issueId },
+      contextSnapshot: { issueId, wakeReason: "distinct_one_shot_retry" },
+      requestedByActorType: "system",
+      requestedByActorId: "test",
+      idempotencyKey: randomUUID(),
+    });
+    expect(second).toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, agentId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+    ));
+    expect(runs).toHaveLength(1);
+    expect((await latestWakeRequest(agentId))?.reason).toBe("heartbeat.one_shot_issue_run_limit");
+  });
+
+  it("serializes simultaneous distinct one-shot wake requests on the issue lock", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: {
+      wakeOnDemand: true, maxConcurrentRuns: 1, oneShotIssueId: issueId,
+    } } }).where(eq(agents.id, agentId));
+
+    const wakes = await Promise.all([
+      assignmentWake(agentId, issueId),
+      heartbeat.wakeup(agentId, {
+        source: "on_demand", triggerDetail: "manual", reason: "different_trigger",
+        payload: { issueId }, contextSnapshot: { issueId, wakeReason: "different_trigger" },
+        requestedByActorType: "system", requestedByActorId: "test",
+        idempotencyKey: randomUUID(),
+      }),
+    ]);
+    expect(wakes.filter(Boolean)).toHaveLength(1);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+    ));
+    expect(runs).toHaveLength(1);
+  });
+
   it("skips event-free re-wakes after consecutive no-progress runs and admits them again on new input", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

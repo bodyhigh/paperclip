@@ -150,7 +150,7 @@ import {
   shouldCancelRunsForNonInvokableAgent,
   type AgentOrgRow,
 } from "../agent-invokability.js";
-import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { heartbeatOneShotIssueId, isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 
@@ -397,6 +397,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+      oneShotIssueId: heartbeatOneShotIssueId(agent),
       // A Dot binding has one external turn. Competing assignments must retain
       // their queue position instead of claiming a second run that cannot bind.
       maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
@@ -2575,6 +2576,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled", {}, { wakeOnDemand: false });
       return null;
     }
+    if (policy.oneShotIssueId && issueId !== policy.oneShotIssueId) {
+      await writeSkippedRequest("heartbeat.one_shot_issue_scope", {}, {
+        oneShotIssueId: policy.oneShotIssueId,
+      });
+      return null;
+    }
 
     const genericTimerWake =
       source === "timer" &&
@@ -2916,6 +2923,42 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               finishedAt: new Date(),
             });
             return { kind: "skipped" as const };
+          }
+
+          if (policy.oneShotIssueId) {
+            // This issue row is locked for the whole admission transaction.
+            // Distinct triggers, retries, and automatic continuations therefore
+            // observe the first committed run before they can create another.
+            const [priorRun] = await tx
+              .select({ id: heartbeatRuns.id })
+              .from(heartbeatRuns)
+              .where(and(
+                eq(heartbeatRuns.companyId, issue.companyId),
+                eq(heartbeatRuns.agentId, agentId),
+                or(
+                  eq(heartbeatRuns.issueId, issue.id),
+                  eq(heartbeatRuns.nativeIssueId, issue.id),
+                  sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                ),
+              ))
+              .limit(1);
+            if (priorRun) {
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: "heartbeat.one_shot_issue_run_limit",
+                payload: { ...(payload ?? {}), issueId: issue.id },
+                status: "skipped",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+                finishedAt: new Date(),
+              });
+              return { kind: "skipped" as const };
+            }
           }
 
           const issueStateGuard = opts.issueStateGuard;

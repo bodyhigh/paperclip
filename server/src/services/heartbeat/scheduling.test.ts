@@ -19,7 +19,7 @@ const now = new Date("2026-10-09T12:00:00.000Z");
 const dueAt = new Date(now.getTime() - 60_000);
 const admitted = { id: "admitted-run" } as Run;
 const timerPolicy = {
-  enabled: false, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 1,
+  enabled: false, intervalSec: 60, wakeOnDemand: true, oneShotIssueId: null, maxConcurrentRuns: 1,
   skipTimerWhenNoActionableWork: false, maxDailyRuns: null, maxDailyCostCents: null,
 };
 
