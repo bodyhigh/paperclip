@@ -150,7 +150,7 @@ import {
   shouldCancelRunsForNonInvokableAgent,
   type AgentOrgRow,
 } from "../agent-invokability.js";
-import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { heartbeatOneShotIssueId, isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 
@@ -397,6 +397,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+      oneShotIssueId: heartbeatOneShotIssueId(agent),
       // A Dot binding has one external turn. Competing assignments must retain
       // their queue position instead of claiming a second run that cannot bind.
       maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
@@ -2116,6 +2117,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       triggerDetail,
       payload,
     });
+    // A wake caller cannot claim a historical one-shot binding. Admission
+    // records the server-side policy that applies to the eventual run.
+    delete enrichedContextSnapshot.oneShotIssueId;
     // Keep each request's own server-derived origin, including coalesced wakes.
     // A run's merged context cannot establish which caller authored one receipt.
     // Overwrite caller-supplied nested context rather than trusting it.
@@ -2566,6 +2570,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const policy = parseHeartbeatPolicy(agent);
+    if (policy.oneShotIssueId) {
+      enrichedContextSnapshot.oneShotIssueId = policy.oneShotIssueId;
+    }
 
     if (source === "timer" && !policy.enabled) {
       await writeSkippedRequest("heartbeat.disabled", {}, { enabled: false });
@@ -2573,6 +2580,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled", {}, { wakeOnDemand: false });
+      return null;
+    }
+    if (policy.oneShotIssueId && issueId !== policy.oneShotIssueId) {
+      await writeSkippedRequest("heartbeat.one_shot_issue_scope", {}, {
+        oneShotIssueId: policy.oneShotIssueId,
+      });
       return null;
     }
 
@@ -2909,6 +2922,42 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               triggerDetail,
               reason: "issue_execution_issue_not_found",
               payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: new Date(),
+            });
+            return { kind: "skipped" as const };
+          }
+
+          // This issue row is locked for the whole admission transaction.
+          // Keep the first run's one-shot limit even if the agent policy later
+          // changes. A currently configured one-shot also rejects any prior run.
+          const [priorOneShotRun] = await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              eq(heartbeatRuns.agentId, agentId),
+              policy.oneShotIssueId
+                ? or(
+                    eq(heartbeatRuns.issueId, issue.id),
+                    eq(heartbeatRuns.nativeIssueId, issue.id),
+                    sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                  )
+                : sql`${heartbeatRuns.contextSnapshot}->>'oneShotIssueId' = ${issue.id}`,
+            ))
+            .limit(1);
+          if (priorOneShotRun) {
+            await tx.insert(agentWakeupRequests).values({
+              ...durableReceiptFields,
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "heartbeat.one_shot_issue_run_limit",
+              payload: { ...(payload ?? {}), issueId: issue.id },
               status: "skipped",
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,

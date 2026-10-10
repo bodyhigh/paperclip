@@ -14,3 +14,25 @@ export function isHeartbeatWakeOnDemandEnabled(
     true,
   );
 }
+
+export function heartbeatOneShotIssueId(
+  agent: Pick<typeof agents.$inferSelect, "runtimeConfig">,
+): string | null {
+  const heartbeat = parseObject(parseObject(agent.runtimeConfig).heartbeat);
+  if (heartbeat.oneShotIssueId === undefined) return null;
+  const value = heartbeat.oneShotIssueId;
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+      ? value.toLowerCase()
+      : "__invalid_one_shot_issue__";
+}
+
+/** A run keeps its one-shot authority after the agent configuration changes. */
+export function isHistoricalOneShotIssueRun(
+  agent: Pick<typeof agents.$inferSelect, "runtimeConfig"> | null | undefined,
+  run: { contextSnapshot?: unknown } | null | undefined,
+  issueId: string,
+): boolean {
+  return Boolean(agent && heartbeatOneShotIssueId(agent)) ||
+    parseObject(run?.contextSnapshot).oneShotIssueId === issueId;
+}

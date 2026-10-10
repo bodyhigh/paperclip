@@ -146,6 +146,36 @@ function createFakeRecovery(): RecoveryEscalationPort {
 }
 
 describe("releaseIssueExecution", () => {
+  it("escalates a failed one-shot issue without queuing a recovery run", async () => {
+    const transaction = createFakeTransaction({
+      findInvokableAgent: vi.fn(async () => ({ ...AGENT, oneShotIssueId: ISSUE.id, oneShotIssueRunLimitReached: true })),
+    });
+    const recovery = createFakeRecovery();
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction), recovery,
+    });
+    const result = await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+    expect(result.outcome.kind).toBe("blocked");
+    expect(transaction.queueImmediateRecoveryRun).not.toHaveBeenCalled();
+    expect(transaction.queueReviewParticipantRecoveryRun).not.toHaveBeenCalled();
+    expect(recovery.escalateStrandedAssignedIssue).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a deferred wake after the one-shot issue has run", async () => {
+    const queue = [wakeCandidate()];
+    const transaction = createFakeTransaction({
+      findNextDeferredWake: vi.fn(async () => queue.shift() ?? null),
+      findInvokableAgent: vi.fn(async () => ({ ...AGENT, oneShotIssueId: ISSUE.id, oneShotIssueRunLimitReached: true })),
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction), recovery: createFakeRecovery(),
+    });
+    await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date() });
+    expect(transaction.cancelDeferredWake).toHaveBeenCalledWith(expect.objectContaining({ wakeId: "wake-1" }));
+    expect(transaction.finalizePromotedWake).not.toHaveBeenCalled();
+    expect(transaction.queueImmediateRecoveryRun).not.toHaveBeenCalled();
+  });
+
   it.each(["closing", "mixed_comments", "explicit_resume", "interaction", "other_source_task", "parent_open"])(
     "checks late completed-delegation mentions without dropping independent input (%s)", async (scenario) => {
       const originalCommentIds = ["closing-comment", "second-comment"];

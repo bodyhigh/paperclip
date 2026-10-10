@@ -235,7 +235,16 @@ async function runReleaseDrain(
     // A length mismatch is the only way the lists can differ: the adapter derives `liveNonSelfCommentIds` with `.filter`, so it is always a subsequence of `queuedCommentIds`.
     const liveCommentIdsDiffer = liveness.liveNonSelfCommentIds.length !== candidate.queuedCommentIds.length;
 
-    const deferredAgent = await ports.transaction.findInvokableAgent({ companyId: run.companyId, agentId: candidate.agentId });
+    const deferredAgent = await ports.transaction.findInvokableAgent({ companyId: run.companyId, agentId: candidate.agentId, issueId: issue.id });
+    if (deferredAgent?.oneShotIssueId &&
+      (deferredAgent.oneShotIssueId !== issue.id || deferredAgent.oneShotIssueRunLimitReached)) {
+      await ports.transaction.cancelDeferredWake({
+        companyId: run.companyId, wakeId: candidate.id,
+        reason: "One-shot issue requires a new manual work order before another run",
+        now: input.now,
+      });
+      continue;
+    }
     const pauseHold = await ports.transaction.getPauseHoldFacts({
       companyId: run.companyId,
       issueId: issue.id,
@@ -502,6 +511,7 @@ async function runReleaseRecoveryTail(
   const recoveryAgent = await transaction.findInvokableAgent({
     companyId: issue.companyId,
     agentId: run.agentId,
+    issueId: issue.id,
   });
 
   const currentParticipant = currentAgentParticipant(issue);
@@ -607,7 +617,9 @@ async function runReleaseRecoveryTail(
       suppressedByPauseHold,
       isStrandedRecoveryOrigin,
       recoveryAgentPresent: recoveryAgent !== null,
-      recoveryAgentInvokable: recoveryAgent?.invokable ?? false,
+      recoveryAgentInvokable: Boolean(recoveryAgent?.invokable &&
+        (!recoveryAgent.oneShotIssueId ||
+          (recoveryAgent.oneShotIssueId === issue.id && !recoveryAgent.oneShotIssueRunLimitReached))),
     },
   });
 

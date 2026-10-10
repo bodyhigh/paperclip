@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
+  agents,
   agentWakeupRequests,
   environmentLeases,
   heartbeatRunEvents,
@@ -18,6 +19,7 @@ import { issueService } from "../issues.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
+import { isHistoricalOneShotIssueRun } from "../heartbeat-policy.js";
 
 export const NATIVE_SAFE_REPLACEMENT_REASON = "native_safe_replacement";
 const record = (v: unknown): Record<string, unknown> =>
@@ -330,6 +332,20 @@ export async function reconcileSafeNativeReplacements(
           current.attempt >= 3
         )
           return false;
+        const [agent] = await tx.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(and(
+          eq(agents.companyId, run.companyId), eq(agents.id, run.agentId),
+        )).limit(1);
+        if (isHistoricalOneShotIssueRun(agent, run, task.id)) {
+          await tx.update(nativeRunFinalizations).set({
+            failureDetail: {
+              ...current.failureDetail,
+              replacementDenied: "one_shot_work_order",
+              nextAction: "Manual review is required before another issue-scoped run.",
+            },
+            updatedAt: now,
+          }).where(eq(nativeRunFinalizations.runId, run.id));
+          return false;
+        }
         if (task.status === "blocked") {
           const failureHolds = await tx.select().from(issueRecoveryActions).where(and(
             eq(issueRecoveryActions.companyId, run.companyId),

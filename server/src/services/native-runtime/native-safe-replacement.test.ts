@@ -136,6 +136,34 @@ const support = externalDatabaseUrl
       });
       return { companyId, agentId, issueId, runId };
     }
+    it("records a manual stop instead of replacing a one-shot failed run", async () => {
+      const source = await seed();
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { oneShotIssueId: source.issueId } } })
+        .where(eq(agents.id, source.agentId));
+      await reconcileSafeNativeReplacements(db);
+      await reconcileSafeNativeReplacements(db);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId)))
+        .toHaveLength(0);
+      const [finalization] = await db.select().from(nativeRunFinalizations)
+        .where(eq(nativeRunFinalizations.runId, source.runId));
+      expect(finalization?.failureDetail).toMatchObject({
+        replacementDenied: "one_shot_work_order",
+      });
+    });
+    it("does not replace a one-shot failed run after agent policy changes", async () => {
+      const source = await seed();
+      await db.update(heartbeatRuns).set({
+        contextSnapshot: { issueId: source.issueId, oneShotIssueId: source.issueId },
+      }).where(eq(heartbeatRuns.id, source.runId));
+      await reconcileSafeNativeReplacements(db);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId)))
+        .toHaveLength(0);
+      const [finalization] = await db.select().from(nativeRunFinalizations)
+        .where(eq(nativeRunFinalizations.runId, source.runId));
+      expect(finalization?.failureDetail).toMatchObject({
+        replacementDenied: "one_shot_work_order",
+      });
+    });
     it.each(["verified", "unproven", "unknown_action"] as const)(
       "preserves saved work and a queued request at a controlled recovery boundary (%s)",
       async (mode) => {
