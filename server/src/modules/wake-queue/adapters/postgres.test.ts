@@ -56,7 +56,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-wake-queue-postgres-adapter-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -104,6 +104,25 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     });
     return agentId;
   }
+
+  it("reports the prior issue run in a one-shot agent snapshot", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId });
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { oneShotIssueId: issueId } } })
+      .where(eq(agents.id, agentId));
+    const runId = await seedRun({ companyId, agentId, contextSnapshot: { issueId }, status: "succeeded" });
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    let snapshot: unknown;
+    await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async (_locked, ports) => {
+      snapshot = await ports.transaction.findInvokableAgent({ companyId, agentId, issueId });
+      return { outcome: { kind: "released" as const }, postCommitEffects: [] };
+    });
+    expect(snapshot!).toMatchObject({
+      oneShotIssueId: issueId, oneShotIssueRunLimitReached: true,
+    });
+  });
 
   async function seedIssue(input: {
     companyId: string;

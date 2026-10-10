@@ -23,6 +23,6 @@ export function heartbeatOneShotIssueId(
   const value = heartbeat.oneShotIssueId;
   return typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-      ? value
+      ? value.toLowerCase()
       : "__invalid_one_shot_issue__";
 }

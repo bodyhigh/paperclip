@@ -52,6 +52,8 @@ export type InvokableAgentSnapshot = {
   companyId: string;
   name: string | null;
   invokable: boolean;
+  oneShotIssueId?: string | null;
+  oneShotIssueRunLimitReached?: boolean;
 };
 
 /** A new heartbeat run reached the queued state and should be published and dispatched. */

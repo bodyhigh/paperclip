@@ -19,6 +19,7 @@ import {
   nativeRunFinalizations,
 } from "@paperclipai/db";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
+import { heartbeatOneShotIssueId } from "../../../services/heartbeat-policy.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../../../services/legacy-execution-recovery.js";
 import {
   authorizeFailedChatRunRetryWake,
@@ -190,7 +191,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
     : null;
 
   return {
-    async findInvokableAgent({ companyId, agentId }): Promise<InvokableAgentSnapshot | null> {
+    async findInvokableAgent({ companyId, agentId, issueId }): Promise<InvokableAgentSnapshot | null> {
       const agent = await tx
         .select()
         .from(agents)
@@ -198,7 +199,16 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
         .then((rows) => rows[0] ?? null);
       if (!agent) return null;
       const invokability = await evaluateAgentInvokabilityFromDb(tx, agent);
-      return { id: agent.id, companyId: agent.companyId, name: agent.name, invokable: invokability.invokable };
+      const oneShotIssueId = heartbeatOneShotIssueId(agent);
+      const [priorOneShotRun] = oneShotIssueId && issueId ? await tx.select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+          or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
+            sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+        )).limit(1) : [];
+      return { id: agent.id, companyId: agent.companyId, name: agent.name,
+        invokable: invokability.invokable, oneShotIssueId,
+        oneShotIssueRunLimitReached: Boolean(priorOneShotRun) };
     },
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {

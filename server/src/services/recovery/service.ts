@@ -2497,7 +2497,11 @@ export function recoveryService(
       issue: input.issue,
       latestRun: input.latestRun,
     });
-    const isProviderQuotaWait = recoveryCause === "provider_quota";
+    // The failed participant owns this quota decision. In review, the issue
+    // assignee can be a different agent from the one-shot reviewer.
+    const quotaAgent = input.latestRun?.agentId ? await getAgent(input.latestRun.agentId) : null;
+    const isProviderQuotaWait = recoveryCause === "provider_quota" &&
+      !(quotaAgent && heartbeatOneShotIssueId(quotaAgent));
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
@@ -2507,7 +2511,7 @@ export function recoveryService(
       // distinct blocker, so it must get a new recovery action and notify the
       // operator, not overwrite the active action of the prior ref.
       supersedeOnIdentityChange: recoveryCause === "configuration_incomplete",
-      preserveExistingOwner: true,
+      preserveExistingOwner: !(recoveryCause === "provider_quota" && !isProviderQuotaWait),
       kind: strandedRecoveryActionKind(recoveryCause),
       ownerType: isProviderQuotaWait ? "system" : "board",
       ownerAgentId: null,
@@ -2539,7 +2543,7 @@ export function recoveryService(
           ? "Board operator: inspect the run evidence, then explicitly choose a valid issue disposition, retry the original owner, reassign, or intentionally resolve the task."
           : recoveryCause === "process_lost"
             ? "Board operator: inspect the retry history, then explicitly retry the original owner, reassign, or intentionally resolve the task."
-            : recoveryCause === "provider_quota"
+            : isProviderQuotaWait
               ? "Wait for provider quota recovery, then retry the original assignee; do not wake a takeover owner."
               : recoveryCause === "codex_output_inactivity_monitor"
                 ? "Board operator: inspect the inactivity evidence, then explicitly retry the original owner, reassign, or intentionally resolve the task."
@@ -2616,6 +2620,8 @@ export function recoveryService(
     actionId: string;
     agentId: string;
   }) {
+    const agent = await getAgent(input.agentId);
+    if (agent && heartbeatOneShotIssueId(agent)) return null;
     const existing = await db
       .select()
       .from(heartbeatRuns)
@@ -3142,6 +3148,8 @@ export function recoveryService(
   }) {
     const agentId = input.issue.assigneeAgentId;
     if (!agentId) return null;
+    const agent = await getAgent(agentId);
+    if (agent && heartbeatOneShotIssueId(agent)) return null;
     // Preserve the initiating identity on the durable row, including while a
     // delayed repair is waiting to dispatch. Never substitute the issue owner.
     const sourceRun = input.latestRun?.id ? await db.select()
@@ -3959,6 +3967,7 @@ export function recoveryService(
     });
     const isProviderQuotaWait =
       recoveryCause === "provider_quota" &&
+      recoveryAction.ownerType === "system" &&
       !recoveryAction.ownerAgentId &&
       Boolean(recoveryAction.returnOwnerAgentId);
     if (isProviderQuotaWait && recoveryAction.returnOwnerAgentId) {
@@ -4256,6 +4265,11 @@ export function recoveryService(
     const targetAgentId = getAdapterFailureRecoveryTargetAgentId(input.issue);
     if (!targetAgentId || input.latestRun.agentId !== targetAgentId)
       return null;
+
+    // A one-shot work order cannot be woken by a quota monitor after its first
+    // run. The caller escalates the failure for a new manual decision instead.
+    const targetAgent = await getAgent(targetAgentId);
+    if (targetAgent && heartbeatOneShotIssueId(targetAgent)) return null;
 
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,
@@ -4765,6 +4779,17 @@ export function recoveryService(
         }
 
         if (adapterFailureClassification.kind === "provider_quota") {
+          const quotaAgent = await getAgent(targetAgentId);
+          if (quotaAgent && heartbeatOneShotIssueId(quotaAgent)) {
+            const escalated = await escalateStrandedAssignedIssue({
+              issue, previousStatus: issue.status as StrandedPreviousStatus,
+              latestRun, recoveryCause: "provider_quota",
+              comment: "One-shot work order stopped at the provider quota. Board review is required before another manual run.",
+            });
+            if (escalated) { result.escalated += 1; result.issueIds.push(issue.id); }
+            else result.skipped += 1;
+            continue;
+          }
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,
             latestRun,
@@ -4989,6 +5014,17 @@ export function recoveryService(
         if (
           participantAdapterFailureClassification?.kind === "provider_quota"
         ) {
+          const quotaAgent = await getAgent(participantAgentId!);
+          if (quotaAgent && heartbeatOneShotIssueId(quotaAgent)) {
+            const escalated = await escalateStrandedAssignedIssue({
+              issue, previousStatus: "in_review", latestRun: participantLatestRun,
+              recoveryCause: "provider_quota",
+              comment: "One-shot reviewer stopped at the provider quota. Board review is required before another manual run.",
+            });
+            if (escalated) { result.escalated += 1; result.issueIds.push(issue.id); }
+            else result.skipped += 1;
+            continue;
+          }
           const monitored = await scheduleProviderQuotaRecoveryMonitor({
             issue,
             latestRun: participantLatestRun,

@@ -3,9 +3,11 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  agentWakeupRequests,
   companies,
   completionContracts,
   createDb,
+  type Db,
   heartbeatRunEvents,
   heartbeatRuns,
   issueRecoveryActions,
@@ -31,6 +33,7 @@ import { executePaperclipNativeSession } from "./native-session-executor.js";
 import { buildNativeCompletionContract } from "./completion-contracts.js";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { prepareNativeHeartbeatRun } from "./prepare-native-run.js";
+import { materializeNativeProviderCapacityRetry } from "./native-provider-capacity-retry.js";
 
 describe("native provider capacity failure persistence", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -60,6 +63,27 @@ describe("native provider capacity failure persistence", () => {
 
   afterAll(async () => {
     await temporary?.cleanup();
+  });
+
+  it("does not materialize an automatic capacity successor for a one-shot agent", async () => {
+    const oneShotAgentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values({
+      id: oneShotAgentId, companyId, name: "One shot capacity agent", status: "active",
+      adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      runtimeConfig: { heartbeat: { oneShotIssueId: issueId } },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId: oneShotAgentId, status: "failed", runtimeMode: "native",
+      nativeIssueId: issueId, contextSnapshot: { issueId },
+    });
+    const successor = await db.transaction((tx) => materializeNativeProviderCapacityRetry({
+      tx: tx as unknown as Db, companyId, issueId, runId, agentId: oneShotAgentId,
+    }));
+    expect(successor).toBeNull();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, oneShotAgentId))).toHaveLength(0);
   });
 
   it.each([false, true])(

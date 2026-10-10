@@ -109,7 +109,7 @@ export type PromoteDeferredWakeInput = {
  * the deferred-wake queue.
  */
 export interface WakeQueueTransaction {
-  findInvokableAgent(input: { companyId: string; agentId: string }): Promise<InvokableAgentSnapshot | null>;
+  findInvokableAgent(input: { companyId: string; agentId: string; issueId?: string }): Promise<InvokableAgentSnapshot | null>;
   findNextDeferredWake(input: { companyId: string; issueId: string; excludedWakeIds?: string[] }): Promise<DeferredWakeCandidate | null>;
   getQueuedCommentLiveness(input: {
     companyId: string;
