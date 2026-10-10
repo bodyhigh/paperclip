@@ -26,3 +26,13 @@ export function heartbeatOneShotIssueId(
       ? value.toLowerCase()
       : "__invalid_one_shot_issue__";
 }
+
+/** A run keeps its one-shot authority after the agent configuration changes. */
+export function isHistoricalOneShotIssueRun(
+  agent: Pick<typeof agents.$inferSelect, "runtimeConfig"> | null | undefined,
+  run: { contextSnapshot?: unknown } | null | undefined,
+  issueId: string,
+): boolean {
+  return Boolean(agent && heartbeatOneShotIssueId(agent)) ||
+    parseObject(run?.contextSnapshot).oneShotIssueId === issueId;
+}

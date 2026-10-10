@@ -19,7 +19,7 @@ import { issueService } from "../issues.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
-import { heartbeatOneShotIssueId } from "../heartbeat-policy.js";
+import { isHistoricalOneShotIssueRun } from "../heartbeat-policy.js";
 
 export const NATIVE_SAFE_REPLACEMENT_REASON = "native_safe_replacement";
 const record = (v: unknown): Record<string, unknown> =>
@@ -335,7 +335,7 @@ export async function reconcileSafeNativeReplacements(
         const [agent] = await tx.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(and(
           eq(agents.companyId, run.companyId), eq(agents.id, run.agentId),
         )).limit(1);
-        if (agent && heartbeatOneShotIssueId(agent)) {
+        if (isHistoricalOneShotIssueRun(agent, run, task.id)) {
           await tx.update(nativeRunFinalizations).set({
             failureDetail: {
               ...current.failureDetail,

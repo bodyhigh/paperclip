@@ -238,13 +238,53 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(second).toBeNull();
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
 
-    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    const runs = await db.select({ id: heartbeatRuns.id, contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, agentId),
       sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
     ));
     expect(runs).toHaveLength(1);
+    expect(runs[0]?.contextSnapshot.oneShotIssueId).toBe(issueId);
     expect((await latestWakeRequest(agentId))?.reason).toBe("heartbeat.one_shot_issue_run_limit");
+  });
+
+  it("keeps the admitted one-shot limit after the agent policy changes", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    await db.update(agents).set({ runtimeConfig: { heartbeat: {
+      wakeOnDemand: true, maxConcurrentRuns: 1, oneShotIssueId: issueId,
+    } } }).where(eq(agents.id, agentId));
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await db.update(agents).set({ runtimeConfig: { heartbeat: {
+      wakeOnDemand: true, maxConcurrentRuns: 1,
+    } } }).where(eq(agents.id, agentId));
+    const second = await assignmentWake(agentId, issueId);
+    expect(second).toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+    ));
+    expect(runs).toHaveLength(1);
+    expect((await latestWakeRequest(agentId))?.reason).toBe("heartbeat.one_shot_issue_run_limit");
+  });
+
+  it("does not accept a caller-supplied one-shot run binding", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const first = await heartbeat.wakeup(agentId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId },
+      contextSnapshot: { issueId, oneShotIssueId: issueId, wakeReason: "issue_assigned" },
+      requestedByActorType: "system", requestedByActorId: "test",
+    });
+    expect(first).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runs = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+    ));
+    expect(runs.length).toBeGreaterThan(0);
+    for (const run of runs) expect(run.contextSnapshot).not.toHaveProperty("oneShotIssueId");
   });
 
   it("serializes simultaneous distinct one-shot wake requests on the issue lock", async () => {

@@ -119,7 +119,7 @@ import {
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
-import { heartbeatOneShotIssueId, isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { isHistoricalOneShotIssueRun, isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
@@ -2501,7 +2501,7 @@ export function recoveryService(
     // assignee can be a different agent from the one-shot reviewer.
     const quotaAgent = input.latestRun?.agentId ? await getAgent(input.latestRun.agentId) : null;
     const isProviderQuotaWait = recoveryCause === "provider_quota" &&
-      !(quotaAgent && heartbeatOneShotIssueId(quotaAgent));
+      !isHistoricalOneShotIssueRun(quotaAgent, input.latestRun, input.issue.id);
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
@@ -2621,7 +2621,7 @@ export function recoveryService(
     agentId: string;
   }) {
     const agent = await getAgent(input.agentId);
-    if (agent && heartbeatOneShotIssueId(agent)) return null;
+    if (isHistoricalOneShotIssueRun(agent, input.latestRun, input.issue.id)) return null;
     const existing = await db
       .select()
       .from(heartbeatRuns)
@@ -3149,7 +3149,7 @@ export function recoveryService(
     const agentId = input.issue.assigneeAgentId;
     if (!agentId) return null;
     const agent = await getAgent(agentId);
-    if (agent && heartbeatOneShotIssueId(agent)) return null;
+    if (isHistoricalOneShotIssueRun(agent, input.latestRun, input.issue.id)) return null;
     // Preserve the initiating identity on the durable row, including while a
     // delayed repair is waiting to dispatch. Never substitute the issue owner.
     const sourceRun = input.latestRun?.id ? await db.select()
@@ -3839,7 +3839,7 @@ export function recoveryService(
     // A one-shot work order deliberately leaves unfinished disposition for the
     // external supervisor to reconcile. Recovery must not reserve a successor
     // run behind the queue's issue-scoped admission guard.
-    if (ownerAgent && heartbeatOneShotIssueId(ownerAgent)) return "skipped";
+    if (isHistoricalOneShotIssueRun(ownerAgent, latestRun, current.id)) return "skipped";
     const ownerInvokable =
       ownerAgent && ownerAgent.companyId === current.companyId
         ? (await isAgentInvokable(ownerAgent)) &&
@@ -4269,7 +4269,7 @@ export function recoveryService(
     // A one-shot work order cannot be woken by a quota monitor after its first
     // run. The caller escalates the failure for a new manual decision instead.
     const targetAgent = await getAgent(targetAgentId);
-    if (targetAgent && heartbeatOneShotIssueId(targetAgent)) return null;
+    if (isHistoricalOneShotIssueRun(targetAgent, input.latestRun, input.issue.id)) return null;
 
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,
@@ -4780,7 +4780,7 @@ export function recoveryService(
 
         if (adapterFailureClassification.kind === "provider_quota") {
           const quotaAgent = await getAgent(targetAgentId);
-          if (quotaAgent && heartbeatOneShotIssueId(quotaAgent)) {
+          if (isHistoricalOneShotIssueRun(quotaAgent, latestRun, issue.id)) {
             const escalated = await escalateStrandedAssignedIssue({
               issue, previousStatus: issue.status as StrandedPreviousStatus,
               latestRun, recoveryCause: "provider_quota",
@@ -5015,7 +5015,7 @@ export function recoveryService(
           participantAdapterFailureClassification?.kind === "provider_quota"
         ) {
           const quotaAgent = await getAgent(participantAgentId!);
-          if (quotaAgent && heartbeatOneShotIssueId(quotaAgent)) {
+          if (isHistoricalOneShotIssueRun(quotaAgent, participantLatestRun, issue.id)) {
             const escalated = await escalateStrandedAssignedIssue({
               issue, previousStatus: "in_review", latestRun: participantLatestRun,
               recoveryCause: "provider_quota",

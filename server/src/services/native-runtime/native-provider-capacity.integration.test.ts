@@ -86,6 +86,29 @@ describe("native provider capacity failure persistence", () => {
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, oneShotAgentId))).toHaveLength(0);
   });
 
+  it("does not retry a one-shot run after the agent policy changes", async () => {
+    const oneShotAgentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(agents).values({
+      id: oneShotAgentId, companyId, name: "Changed one shot agent", status: "active",
+      adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      runtimeConfig: { heartbeat: { oneShotIssueId: issueId } },
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId, companyId, agentId: oneShotAgentId, status: "failed", runtimeMode: "native",
+      nativeIssueId: issueId, contextSnapshot: { issueId, oneShotIssueId: issueId },
+    });
+    await db.update(agents).set({ runtimeConfig: {} }).where(eq(agents.id, oneShotAgentId));
+
+    const successor = await db.transaction((tx) => materializeNativeProviderCapacityRetry({
+      tx: tx as unknown as Db, companyId, issueId, runId, agentId: oneShotAgentId,
+    }));
+    expect(successor).toBeNull();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, oneShotAgentId))).toHaveLength(0);
+  });
+
   it.each([false, true])(
     "stops automatic retries for a durable usage terminal (replayed=%s)",
     async (replayed) => {

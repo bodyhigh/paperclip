@@ -2117,6 +2117,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       triggerDetail,
       payload,
     });
+    // A wake caller cannot claim a historical one-shot binding. Admission
+    // records the server-side policy that applies to the eventual run.
+    delete enrichedContextSnapshot.oneShotIssueId;
     // Keep each request's own server-derived origin, including coalesced wakes.
     // A run's merged context cannot establish which caller authored one receipt.
     // Overwrite caller-supplied nested context rather than trusting it.
@@ -2567,6 +2570,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const policy = parseHeartbeatPolicy(agent);
+    if (policy.oneShotIssueId) {
+      enrichedContextSnapshot.oneShotIssueId = policy.oneShotIssueId;
+    }
 
     if (source === "timer" && !policy.enabled) {
       await writeSkippedRequest("heartbeat.disabled", {}, { enabled: false });
@@ -2925,40 +2931,40 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
-          if (policy.oneShotIssueId) {
-            // This issue row is locked for the whole admission transaction.
-            // Distinct triggers, retries, and automatic continuations therefore
-            // observe the first committed run before they can create another.
-            const [priorRun] = await tx
-              .select({ id: heartbeatRuns.id })
-              .from(heartbeatRuns)
-              .where(and(
-                eq(heartbeatRuns.companyId, issue.companyId),
-                eq(heartbeatRuns.agentId, agentId),
-                or(
-                  eq(heartbeatRuns.issueId, issue.id),
-                  eq(heartbeatRuns.nativeIssueId, issue.id),
-                  sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
-                ),
-              ))
-              .limit(1);
-            if (priorRun) {
-              await tx.insert(agentWakeupRequests).values({
-                ...durableReceiptFields,
-                companyId: agent.companyId,
-                agentId,
-                source,
-                triggerDetail,
-                reason: "heartbeat.one_shot_issue_run_limit",
-                payload: { ...(payload ?? {}), issueId: issue.id },
-                status: "skipped",
-                requestedByActorType: opts.requestedByActorType ?? null,
-                requestedByActorId: opts.requestedByActorId ?? null,
-                idempotencyKey: opts.idempotencyKey ?? null,
-                finishedAt: new Date(),
-              });
-              return { kind: "skipped" as const };
-            }
+          // This issue row is locked for the whole admission transaction.
+          // Keep the first run's one-shot limit even if the agent policy later
+          // changes. A currently configured one-shot also rejects any prior run.
+          const [priorOneShotRun] = await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              eq(heartbeatRuns.agentId, agentId),
+              policy.oneShotIssueId
+                ? or(
+                    eq(heartbeatRuns.issueId, issue.id),
+                    eq(heartbeatRuns.nativeIssueId, issue.id),
+                    sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                  )
+                : sql`${heartbeatRuns.contextSnapshot}->>'oneShotIssueId' = ${issue.id}`,
+            ))
+            .limit(1);
+          if (priorOneShotRun) {
+            await tx.insert(agentWakeupRequests).values({
+              ...durableReceiptFields,
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "heartbeat.one_shot_issue_run_limit",
+              payload: { ...(payload ?? {}), issueId: issue.id },
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: new Date(),
+            });
+            return { kind: "skipped" as const };
           }
 
           const issueStateGuard = opts.issueStateGuard;

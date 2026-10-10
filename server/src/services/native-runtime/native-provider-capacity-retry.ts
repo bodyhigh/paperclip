@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { agents, agentWakeupRequests, heartbeatRuns, type Db } from "@paperclipai/db";
-import { heartbeatOneShotIssueId } from "../heartbeat-policy.js";
+import { isHistoricalOneShotIssueRun } from "../heartbeat-policy.js";
 import { accountingForScheduledRetry, executionFailureRetryCount } from "../execution-recovery-attempt.js";
 import { NATIVE_PROVIDER_CAPACITY_MAX_RETRIES, NATIVE_PROVIDER_OVERLOADED_CODE, NATIVE_PROVIDER_OVERLOADED_MESSAGE } from "./native-provider-failure.js";
 
@@ -23,7 +23,7 @@ export async function materializeNativeProviderCapacityRetry(input: {
   )).limit(1);
   // A manual one-shot issue needs a new operator decision after any failure.
   // Native finalization must not create a successor behind the ordinary wake gate.
-  if (agent && heartbeatOneShotIssueId(agent)) return null;
+  if (isHistoricalOneShotIssueRun(agent, run, input.issueId)) return null;
   // Share the predecessor claim with every other failure-retry lane.
   const [existing] = await input.tx.select().from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.retryOfRunId, run.id),
