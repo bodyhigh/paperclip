@@ -142,6 +142,32 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     });
   });
 
+  it("does not queue immediate recovery when a failed one-shot run loses current policy", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId });
+    const runId = await seedRun({ companyId, agentId, status: "failed",
+      contextSnapshot: { issueId, oneShotIssueId: issueId } });
+    // A pre-provider bootstrap failure can reach the ordinary release tail.
+    // The historical one-shot binding must still suppress its recovery wake.
+    await db.update(heartbeatRuns).set({ resultJson: {
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId })
+      .where(eq(issues.id, issueId));
+    const release = createReleaseIssueExecution({
+      issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => {},
+        escalateStrandedRecoveryIssueInPlace: async () => {} },
+    });
+    const result = await release({ companyId, runId, now: new Date() });
+    expect(result.outcome.kind).toBe("blocked");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId)))
+      .toHaveLength(0);
+  });
+
   it("does not promote a deferred comment after a one-shot run loses current policy", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
